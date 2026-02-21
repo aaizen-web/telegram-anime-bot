@@ -19,7 +19,7 @@ from telegram.ext import (
 # ================================
 
 import os
-BOT_TOKEN = os.getenv("7684273167:AAEMUZICWKamqKukES3ehOKO9HDar0D49JA")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 ANIME_PER_PAGE = 10
 
@@ -705,4 +705,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
