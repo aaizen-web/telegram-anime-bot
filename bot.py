@@ -681,7 +681,53 @@ async def show_analytics(update, context):
         ])
     )
 
+import sqlite3
+
+def init_db():
+    conn = sqlite3.connect("anime.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_active TIMESTAMP,
+        total_requests INTEGER DEFAULT 0
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS animes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS episodes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anime_id INTEGER,
+        episode_number INTEGER,
+        file_id TEXT,
+        UNIQUE(anime_id, episode_number)
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS watch_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        anime_id INTEGER,
+        episode_number INTEGER,
+        watched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
 def main():
+    init_db() 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -707,3 +753,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
