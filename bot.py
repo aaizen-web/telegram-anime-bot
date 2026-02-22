@@ -1,6 +1,12 @@
 CHANNEL_ID = -1003819722036
 ADMIN_ID = 6374990539
 
+# ================================
+# 🔥 FORCE JOIN SETTINGS
+# ================================
+FORCE_JOIN_CHANNEL = "@farrisforger"
+FORCE_JOIN_LINK = "https://t.me/farrisforger"
+
 from telegram.ext import MessageHandler, filters
 
 import psycopg2
@@ -90,11 +96,40 @@ def is_spamming(user_id):
     return False
 
 # =====================================================
+# ========== FORCE JOIN CHECK =========================
+# =====================================================
+
+async def is_user_member(bot, user_id):
+    try:
+        member = await bot.get_chat_member(chat_id=FORCE_JOIN_CHANNEL, user_id=user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except:
+        return False
+
+async def send_join_message(update):
+    keyboard = [
+        [InlineKeyboardButton("📢 Join Channel", url=FORCE_JOIN_LINK)],
+        [InlineKeyboardButton("✅ I Joined!", callback_data="check_join")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "⚠️ You must join our channel first to use this bot!\n\n"
+        "👇 Click the button below to join:",
+        reply_markup=reply_markup
+    )
+
+# =====================================================
 # ========== BOT HANDLERS =============================
 # =====================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
+    # Force join check
+    if not await is_user_member(context.bot, user_id):
+        await send_join_message(update)
+        return
 
     conn = get_conn()
     cursor = conn.cursor()
@@ -126,6 +161,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Welcome! Choose an option:",
         reply_markup=reply_markup,
+    )
+
+
+async def check_join(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    if not await is_user_member(context.bot, user_id):
+        keyboard = [
+            [InlineKeyboardButton("📢 Join Channel", url=FORCE_JOIN_LINK)],
+            [InlineKeyboardButton("✅ I Joined!", callback_data="check_join")]
+        ]
+        await query.edit_message_text(
+            "❌ You have not joined the channel yet!\n\n"
+            "Please join and then click 'I Joined!' again:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    # User has joined, show welcome
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO users (user_id, last_active, total_requests)
+        VALUES (%s, CURRENT_TIMESTAMP, 1)
+        ON CONFLICT (user_id)
+        DO UPDATE SET
+            last_active = CURRENT_TIMESTAMP,
+            total_requests = users.total_requests + 1
+    """, (user_id,))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    keyboard = [
+        [InlineKeyboardButton("📚 Browse Anime", callback_data="show_anime")]
+    ]
+
+    if user_id == ADMIN_ID:
+        keyboard.append(
+            [InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel")]
+        )
+
+    await query.edit_message_text(
+        "✅ Thank you for joining! Welcome!\n\nChoose an option:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -746,6 +831,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(check_join, pattern="^check_join$"))
     app.add_handler(CallbackQueryHandler(show_anime, pattern="^(show_anime|page\\|)"))
     app.add_handler(CallbackQueryHandler(show_episodes, pattern="^anime\\|"))
     app.add_handler(CallbackQueryHandler(send_episode, pattern="^episode\\|"))
@@ -768,5 +854,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
