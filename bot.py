@@ -524,6 +524,8 @@ admin_state = {}
 
 
 async def handle_admin_text(update, context):
+    if not update.effective_user:
+        return
     user_id = update.effective_user.id
 
     if user_id not in admin_state:
@@ -594,6 +596,8 @@ async def handle_admin_text(update, context):
 
 
 async def handle_text_search(update, context):
+     if not update.effective_user:
+        return
     user_id = update.effective_user.id
 
     if user_id not in user_search_mode:
@@ -763,3 +767,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
