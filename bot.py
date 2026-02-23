@@ -7,11 +7,7 @@ ADMIN_ID = 6374990539
 FORCE_JOIN_CHANNEL = "@farrisforger"
 FORCE_JOIN_LINK = "https://t.me/farrisforger"
 
-# ================================
-# 🔥 WEBHOOK SETTINGS
-# ================================
-WEBHOOK_URL = "https://telegram-anime-bot-production-3d6b.up.railway.app"
-WEBHOOK_PORT = 8443
+
 
 from telegram.ext import MessageHandler, filters
 from psycopg2 import pool
@@ -545,6 +541,87 @@ async def add_anime(update, context):
     await update.message.reply_text(f"✅ {anime_name} added successfully.")
 
 
+
+async def bulk_add(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /bulk_add Anime Name | Season Number | StartEpisode-EndEpisode
+"
+            "Example: /bulk_add Naruto | 1 | 1-24"
+        )
+        return
+
+    text = " ".join(context.args)
+    parts = text.split("|")
+    if len(parts) != 3:
+        await update.message.reply_text(
+            "Usage: /bulk_add Anime Name | Season Number | StartEpisode-EndEpisode
+"
+            "Example: /bulk_add Naruto | 1 | 1-24"
+        )
+        return
+
+    anime_name = parts[0].strip()
+    season_number = int(parts[1].strip())
+    episode_range = parts[2].strip()
+
+    if "-" not in episode_range:
+        await update.message.reply_text("Episode range must be like: 1-24")
+        return
+
+    start_ep, end_ep = episode_range.split("-")
+    start_ep = int(start_ep.strip())
+    end_ep = int(end_ep.strip())
+
+    if start_ep > end_ep:
+        await update.message.reply_text("Start episode must be less than end episode.")
+        return
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
+    result = cursor.fetchone()
+    if not result:
+        await update.message.reply_text(f"Anime '{anime_name}' not found. Add it first with /add_anime")
+        cursor.close()
+        release_conn(conn)
+        return
+
+    anime_id = result[0]
+
+    # Auto create season if not exists
+    cursor.execute("""
+        INSERT INTO seasons (anime_id, season_number)
+        VALUES (%s, %s) ON CONFLICT (anime_id, season_number) DO NOTHING
+    """, (anime_id, season_number))
+
+    cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
+    season_id = cursor.fetchone()[0]
+    conn.commit()
+    cursor.close()
+    release_conn(conn)
+
+    # Build the caption list for user to upload
+    total = end_ep - start_ep + 1
+    captions = []
+    for ep in range(start_ep, end_ep + 1):
+        captions.append(f"{anime_name} | {season_number} | {ep}")
+
+    caption_text = "
+".join(captions)
+
+    await update.message.reply_text(
+        f"✅ Season {season_number} ready for {anime_name}!
+
+"
+        f"Now upload {total} videos to your storage channel with these captions in order:
+
+"
+        f"{caption_text}"
+    )
+
 async def add_season(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -758,6 +835,7 @@ async def admin_panel(update, context):
         [InlineKeyboardButton("➕ Add Anime", callback_data="admin_add_anime")],
         [InlineKeyboardButton("➕ Add Season", callback_data="admin_add_season")],
         [InlineKeyboardButton("➕ Add Episode", callback_data="admin_add_episode")],
+        [InlineKeyboardButton("⚡ Bulk Add Episodes", callback_data="admin_bulk_add")],
         [InlineKeyboardButton("❌ Delete Anime", callback_data="admin_delete_anime")],
         [InlineKeyboardButton("❌ Delete Season", callback_data="admin_delete_season")],
         [InlineKeyboardButton("❌ Delete Episode", callback_data="admin_delete_episode")],
@@ -781,6 +859,12 @@ async def handle_admin_actions(update, context):
         await query.message.reply_text("Send: Anime Name | Season Number\nExample: Naruto | 2")
     elif action == "admin_add_episode":
         await query.message.reply_text("Send: Anime Name | Season Number | Episode Number\nExample: Naruto | 1 | 5")
+    elif action == "admin_bulk_add":
+        await query.message.reply_text(
+            "Send: Anime Name | Season Number | StartEpisode-EndEpisode
+"
+            "Example: Naruto | 1 | 1-24"
+        )
     elif action == "admin_delete_anime":
         await query.message.reply_text("Send anime name to delete:")
     elif action == "admin_delete_season":
@@ -991,6 +1075,7 @@ def main():
     app.add_handler(CallbackQueryHandler(noop, pattern="^noop$"))
     app.add_handler(CommandHandler("add_anime", add_anime))
     app.add_handler(CommandHandler("add_season", add_season))
+    app.add_handler(CommandHandler("bulk_add", bulk_add))
     app.add_handler(CommandHandler("add_episode", add_episode))
     app.add_handler(CommandHandler("delete_anime", delete_anime))
     app.add_handler(CommandHandler("delete_season", delete_season))
@@ -1004,17 +1089,13 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_search), group=2)
 
-    print("🚀 Bot starting with webhook...")
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=WEBHOOK_PORT,
-        webhook_url=f"{WEBHOOK_URL}/webhook",
-        url_path="/webhook"
-    )
+    print("🚀 Bot is running with polling...")
+    app.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
