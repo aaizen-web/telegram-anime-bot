@@ -7,6 +7,12 @@ ADMIN_ID = 6374990539
 FORCE_JOIN_CHANNEL = "@farrisforger"
 FORCE_JOIN_LINK = "https://t.me/farrisforger"
 
+# ================================
+# 🔥 WEBHOOK SETTINGS
+# ================================
+WEBHOOK_URL = "https://telegram-anime-bot-production-3d6b.up.railway.app"
+WEBHOOK_PORT = 8443
+
 from telegram.ext import MessageHandler, filters
 from psycopg2 import pool
 
@@ -965,8 +971,8 @@ async def noop(update, context):
 
 
 def main():
-    init_pool()   # 🔥 Start connection pool first
-    init_db()     # ✅ Create tables
+    init_pool()
+    init_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -992,8 +998,13 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_search), group=2)
 
-    print("🚀 Bot is running...")
-    app.run_polling()
+    print("🚀 Bot starting with webhook...")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=WEBHOOK_PORT,
+        webhook_url=f"{WEBHOOK_URL}/webhook",
+        url_path="/webhook"
+    )
 
 
 if __name__ == "__main__":
