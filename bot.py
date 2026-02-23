@@ -26,9 +26,12 @@ from telegram.ext import (
 # ================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway sets this automatically
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 ANIME_PER_PAGE = 10
+EPISODES_PER_PAGE = 50  # max episodes before pagination
+EPISODES_PER_COLUMN = 10  # episodes per column
+
 user_cooldown = {}
 
 # =====================================================
@@ -59,12 +62,22 @@ def init_db():
     """)
 
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS seasons (
+            id SERIAL PRIMARY KEY,
+            anime_id INTEGER REFERENCES animes(id),
+            season_number INTEGER NOT NULL,
+            UNIQUE(anime_id, season_number)
+        )
+    """)
+
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS episodes (
             id SERIAL PRIMARY KEY,
             anime_id INTEGER REFERENCES animes(id),
+            season_id INTEGER REFERENCES seasons(id),
             episode_number INTEGER NOT NULL,
             file_id TEXT NOT NULL,
-            UNIQUE(anime_id, episode_number)
+            UNIQUE(season_id, episode_number)
         )
     """)
 
@@ -73,6 +86,7 @@ def init_db():
             id SERIAL PRIMARY KEY,
             user_id BIGINT,
             anime_id INTEGER,
+            season_id INTEGER,
             episode_number INTEGER,
             watched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -112,12 +126,83 @@ async def send_join_message(update):
         [InlineKeyboardButton("✅ I Joined!", callback_data="check_join")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "⚠️ You must join our channel first to use this bot!\n\n"
         "👇 Click the button below to join:",
         reply_markup=reply_markup
     )
+
+# =====================================================
+# ========== EPISODE GRID LAYOUT ======================
+# =====================================================
+
+def build_episode_keyboard(episodes, season_id, anime_id, page=0):
+    """
+    Build episode keyboard with column layout:
+    - Episodes shown in columns of 10
+    - Each group of 10 becomes a new column (shown side by side)
+    - Max 50 episodes per page, rest paginated
+    - Header row shows season number label
+    """
+    start = page * EPISODES_PER_PAGE
+    end = start + EPISODES_PER_PAGE
+    page_episodes = episodes[start:end]
+
+    keyboard = []
+
+    # Build columns: group episodes into chunks of 10
+    # Each chunk = one column, displayed side by side row by row
+    columns = []
+    for i in range(0, len(page_episodes), EPISODES_PER_COLUMN):
+        columns.append(page_episodes[i:i + EPISODES_PER_COLUMN])
+
+    # Max 5 columns per page (5 * 10 = 50)
+    num_columns = len(columns)
+    num_rows = EPISODES_PER_COLUMN  # 10 rows
+
+    # Header row: show column numbers (Season X label handled outside)
+    if num_columns > 1:
+        header_row = []
+        for col_idx in range(num_columns):
+            col_start = start + col_idx * EPISODES_PER_COLUMN + 1
+            col_end = min(start + (col_idx + 1) * EPISODES_PER_COLUMN, start + len(page_episodes))
+            header_row.append(
+                InlineKeyboardButton(
+                    f"Ep {col_start}-{col_end}",
+                    callback_data="noop"
+                )
+            )
+        keyboard.append(header_row)
+
+    # Episode rows: go row by row across columns
+    for row in range(num_rows):
+        ep_row = []
+        for col in columns:
+            if row < len(col):
+                ep = col[row]
+                ep_row.append(
+                    InlineKeyboardButton(
+                        f"Ep {ep[0]}",
+                        callback_data=f"episode|{anime_id}|{season_id}|{ep[0]}"
+                    )
+                )
+        if ep_row:
+            keyboard.append(ep_row)
+
+    # Pagination buttons
+    nav = []
+    total_episodes = len(episodes)
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"eppage|{anime_id}|{season_id}|{page-1}"))
+    if end < total_episodes:
+        nav.append(InlineKeyboardButton("Next ➡", callback_data=f"eppage|{anime_id}|{season_id}|{page+1}"))
+    if nav:
+        keyboard.append(nav)
+
+    # Back button
+    keyboard.append([InlineKeyboardButton("🔙 Back to Seasons", callback_data=f"seasons|{anime_id}")])
+
+    return keyboard
 
 # =====================================================
 # ========== BOT HANDLERS =============================
@@ -126,14 +211,12 @@ async def send_join_message(update):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    # Force join check
     if not await is_user_member(context.bot, user_id):
         await send_join_message(update)
         return
 
     conn = get_conn()
     cursor = conn.cursor()
-
     cursor.execute("""
         INSERT INTO users (user_id, last_active, total_requests)
         VALUES (%s, CURRENT_TIMESTAMP, 1)
@@ -142,32 +225,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             last_active = CURRENT_TIMESTAMP,
             total_requests = users.total_requests + 1
     """, (user_id,))
-
     conn.commit()
     cursor.close()
     conn.close()
 
-    keyboard = [
-        [InlineKeyboardButton("📚 Browse Anime", callback_data="show_anime")]
-    ]
-
-    if update.effective_user.id == ADMIN_ID:
-        keyboard.append(
-            [InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel")]
-        )
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = [[InlineKeyboardButton("📚 Browse Anime", callback_data="show_anime")]]
+    if user_id == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel")])
 
     await update.message.reply_text(
         "Welcome! Choose an option:",
-        reply_markup=reply_markup,
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 async def check_join(update, context):
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
 
     if not await is_user_member(context.bot, user_id):
@@ -176,16 +250,13 @@ async def check_join(update, context):
             [InlineKeyboardButton("✅ I Joined!", callback_data="check_join")]
         ]
         await query.edit_message_text(
-            "❌ You have not joined the channel yet!\n\n"
-            "Please join and then click 'I Joined!' again:",
+            "❌ You have not joined the channel yet!\n\nPlease join and then click 'I Joined!' again:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
-    # User has joined, show welcome
     conn = get_conn()
     cursor = conn.cursor()
-
     cursor.execute("""
         INSERT INTO users (user_id, last_active, total_requests)
         VALUES (%s, CURRENT_TIMESTAMP, 1)
@@ -194,19 +265,13 @@ async def check_join(update, context):
             last_active = CURRENT_TIMESTAMP,
             total_requests = users.total_requests + 1
     """, (user_id,))
-
     conn.commit()
     cursor.close()
     conn.close()
 
-    keyboard = [
-        [InlineKeyboardButton("📚 Browse Anime", callback_data="show_anime")]
-    ]
-
+    keyboard = [[InlineKeyboardButton("📚 Browse Anime", callback_data="show_anime")]]
     if user_id == ADMIN_ID:
-        keyboard.append(
-            [InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel")]
-        )
+        keyboard.append([InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel")])
 
     await query.edit_message_text(
         "✅ Thank you for joining! Welcome!\n\nChoose an option:",
@@ -224,103 +289,141 @@ async def show_anime(update, context):
 
     conn = get_conn()
     cursor = conn.cursor()
-
     cursor.execute("SELECT COUNT(*) FROM animes")
     total = cursor.fetchone()[0]
-
     cursor.execute("""
-        SELECT name FROM animes
-        ORDER BY name ASC
-        LIMIT %s OFFSET %s
+        SELECT name FROM animes ORDER BY name ASC LIMIT %s OFFSET %s
     """, (ANIME_PER_PAGE, page * ANIME_PER_PAGE))
-
     animes = cursor.fetchall()
     cursor.close()
     conn.close()
 
-    keyboard = []
-
-    keyboard.append([
-        InlineKeyboardButton("🔍 Search", callback_data="search_mode")
-    ])
-
+    keyboard = [[InlineKeyboardButton("🔍 Search", callback_data="search_mode")]]
     for anime in animes:
-        keyboard.append([
-            InlineKeyboardButton(anime[0], callback_data=f"anime|{anime[0]}")
-        ])
+        keyboard.append([InlineKeyboardButton(anime[0], callback_data=f"anime|{anime[0]}")])
 
     nav_buttons = []
-
     if page > 0:
-        nav_buttons.append(
-            InlineKeyboardButton("⬅ Previous", callback_data=f"page|{page-1}")
-        )
-
+        nav_buttons.append(InlineKeyboardButton("⬅ Previous", callback_data=f"page|{page-1}"))
     if (page + 1) * ANIME_PER_PAGE < total:
-        nav_buttons.append(
-            InlineKeyboardButton("Next ➡", callback_data=f"page|{page+1}")
-        )
-
+        nav_buttons.append(InlineKeyboardButton("Next ➡", callback_data=f"page|{page+1}"))
     if nav_buttons:
         keyboard.append(nav_buttons)
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("Select an anime:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def show_seasons(update, context):
+    """Show seasons for a selected anime"""
+    query = update.callback_query
+    await query.answer()
+
+    # Called from anime| or seasons| callbacks
+    if query.data.startswith("anime|"):
+        _, anime_name = query.data.split("|", 1)
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
+        result = cursor.fetchone()
+        if not result:
+            await query.answer("Anime not found!", show_alert=True)
+            cursor.close()
+            conn.close()
+            return
+        anime_id = result[0]
+        cursor.close()
+        conn.close()
+    else:
+        # seasons|anime_id
+        _, anime_id = query.data.split("|", 1)
+        anime_id = int(anime_id)
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM animes WHERE id = %s", (anime_id,))
+    anime_name = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT id, season_number FROM seasons
+        WHERE anime_id = %s ORDER BY season_number ASC
+    """, (anime_id,))
+    seasons = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    if not seasons:
+        await query.edit_message_text(
+            f"❌ No seasons found for {anime_name}.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="show_anime")]
+            ])
+        )
+        return
+
+    keyboard = []
+    for season in seasons:
+        season_id, season_number = season
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🎬 Season {season_number}",
+                callback_data=f"season_ep|{anime_id}|{season_id}|0"
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="show_anime")])
 
     await query.edit_message_text(
-        "Select an anime:",
-        reply_markup=reply_markup
+        f"📺 {anime_name}\n\nSelect a season:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 async def show_episodes(update, context):
+    """Show episodes for a selected season with grid layout"""
     query = update.callback_query
     await query.answer()
 
-    _, anime_name = query.data.split("|")
+    # callback: season_ep|anime_id|season_id|page OR eppage|anime_id|season_id|page
+    parts = query.data.split("|")
+    anime_id = int(parts[1])
+    season_id = int(parts[2])
+    page = int(parts[3])
 
     conn = get_conn()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
-    result = cursor.fetchone()
+    cursor.execute("SELECT name FROM animes WHERE id = %s", (anime_id,))
+    anime_name = cursor.fetchone()[0]
 
-    if not result:
-        await query.answer("Anime not found!", show_alert=True)
-        cursor.close()
-        conn.close()
-        return
-
-    anime_id = result[0]
+    cursor.execute("SELECT season_number FROM seasons WHERE id = %s", (season_id,))
+    season_number = cursor.fetchone()[0]
 
     cursor.execute("""
-        SELECT episode_number
-        FROM episodes
-        WHERE anime_id = %s
-        ORDER BY episode_number ASC
-    """, (anime_id,))
-
+        SELECT episode_number FROM episodes
+        WHERE season_id = %s ORDER BY episode_number ASC
+    """, (season_id,))
     episodes = cursor.fetchall()
     cursor.close()
     conn.close()
 
-    keyboard = []
-    for ep in episodes:
-        keyboard.append([
-            InlineKeyboardButton(
-                f"Episode {ep[0]}",
-                callback_data=f"episode|{anime_id}|{ep[0]}"
-            )
-        ])
+    if not episodes:
+        await query.edit_message_text(
+            f"❌ No episodes found for Season {season_number}.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data=f"seasons|{anime_id}")]
+            ])
+        )
+        return
 
-    keyboard.append([
-        InlineKeyboardButton("🔙 Back", callback_data="show_anime")
-    ])
+    keyboard = build_episode_keyboard(episodes, season_id, anime_id, page)
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    total = len(episodes)
+    start = page * EPISODES_PER_PAGE + 1
+    end = min((page + 1) * EPISODES_PER_PAGE, total)
 
     await query.edit_message_text(
-        f"{anime_name} Episodes:",
-        reply_markup=reply_markup
+        f"📺 {anime_name} — Season {season_number}\n"
+        f"🎬 Episodes {start}-{end} of {total}:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -332,17 +435,15 @@ async def send_episode(update, context):
         await query.answer("Please slow down 😄", show_alert=True)
         return
 
-    _, anime_id, episode_number = query.data.split("|")
+    # callback: episode|anime_id|season_id|episode_number
+    _, anime_id, season_id, episode_number = query.data.split("|")
 
     conn = get_conn()
     cursor = conn.cursor()
-
     cursor.execute("""
-        SELECT file_id
-        FROM episodes
-        WHERE anime_id = %s AND episode_number = %s
-    """, (anime_id, episode_number))
-
+        SELECT file_id FROM episodes
+        WHERE season_id = %s AND episode_number = %s
+    """, (season_id, episode_number))
     result = cursor.fetchone()
 
     if not result:
@@ -353,87 +454,39 @@ async def send_episode(update, context):
 
     file_id = result[0]
 
+    # Get season number for caption
+    cursor.execute("SELECT season_number FROM seasons WHERE id = %s", (season_id,))
+    season_number = cursor.fetchone()[0]
+
     video_msg = await query.message.reply_video(
         video=file_id,
-        caption=f"Episode {episode_number}"
+        caption=f"Season {season_number} — Episode {episode_number}"
     )
 
     cursor.execute("""
-        INSERT INTO watch_history (user_id, anime_id, episode_number)
-        VALUES (%s, %s, %s)
-    """, (query.from_user.id, anime_id, episode_number))
-
+        INSERT INTO watch_history (user_id, anime_id, season_id, episode_number)
+        VALUES (%s, %s, %s, %s)
+    """, (query.from_user.id, anime_id, season_id, episode_number))
     conn.commit()
     cursor.close()
     conn.close()
 
-    warning_msg = await query.message.reply_text(
-        "⚠️ All messages will be deleted in 5 minutes."
-    )
-
-    asyncio.create_task(
-        auto_delete([video_msg, warning_msg, query.message])
-    )
-
-
-async def add_anime(update, context):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /add_anime Anime Name")
-        return
-
-    anime_name = " ".join(context.args)
-
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("INSERT INTO animes (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (anime_name,))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    await update.message.reply_text(f"✅ {anime_name} added successfully.")
-
-
-async def add_episode(update, context):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /add_episode Anime_Name EpisodeNumber")
-        return
-
-    episode_number = int(context.args[-1])
-    anime_name = " ".join(context.args[:-1])
-
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
-    result = cursor.fetchone()
-    cursor.close()
-    conn.close()
-
-    if not result:
-        await update.message.reply_text("Anime not found.")
-        return
-
-    await update.message.reply_text(
-        f"Now upload the episode video to the storage channel with caption:\n\n{anime_name} | {episode_number}"
-    )
+    warning_msg = await query.message.reply_text("⚠️ All messages will be deleted in 5 minutes.")
+    asyncio.create_task(auto_delete([video_msg, warning_msg, query.message]))
 
 
 async def handle_channel_video(update, context):
+    """
+    Caption format for uploading episodes:
+    Anime Name | Season Number | Episode Number
+    Example: Naruto | 1 | 5
+    """
     print("Channel update received")
 
     if update.channel_post and update.channel_post.video:
         print("Video detected in channel")
-
         file_id = update.channel_post.video.file_id
         caption = update.channel_post.caption
-
         print("Caption:", caption)
 
         if not caption:
@@ -441,37 +494,48 @@ async def handle_channel_video(update, context):
             return
 
         parts = caption.split("|")
-        if len(parts) != 2:
-            print("Caption format incorrect")
+        if len(parts) != 3:
+            print("Caption format incorrect. Use: Anime Name | Season | Episode")
             return
 
         anime_name = parts[0].strip()
-        episode_number = int(parts[1].strip())
+        season_number = int(parts[1].strip())
+        episode_number = int(parts[2].strip())
 
         conn = get_conn()
         cursor = conn.cursor()
 
         cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
         result = cursor.fetchone()
-
         if not result:
+            print(f"Anime '{anime_name}' not found")
             cursor.close()
             conn.close()
             return
 
         anime_id = result[0]
 
+        # Auto-create season if it doesn't exist
         cursor.execute("""
-            INSERT INTO episodes (anime_id, episode_number, file_id)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (anime_id, episode_number)
+            INSERT INTO seasons (anime_id, season_number)
+            VALUES (%s, %s)
+            ON CONFLICT (anime_id, season_number) DO NOTHING
+        """, (anime_id, season_number))
+
+        cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
+        season_id = cursor.fetchone()[0]
+
+        cursor.execute("""
+            INSERT INTO episodes (anime_id, season_id, episode_number, file_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (season_id, episode_number)
             DO UPDATE SET file_id = EXCLUDED.file_id
-        """, (anime_id, episode_number, file_id))
+        """, (anime_id, season_id, episode_number, file_id))
 
         conn.commit()
         cursor.close()
         conn.close()
-        print(f"✅ Episode {episode_number} of '{anime_name}' saved.")
+        print(f"✅ {anime_name} | Season {season_number} | Episode {episode_number} saved.")
 
 
 async def auto_delete(messages):
@@ -483,22 +547,236 @@ async def auto_delete(messages):
             pass
 
 
+async def add_anime(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /add_anime Anime Name")
+        return
+    anime_name = " ".join(context.args)
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO animes (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (anime_name,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    await update.message.reply_text(f"✅ {anime_name} added successfully.")
+
+
+async def add_season(update, context):
+    """Usage: /add_season Anime Name | Season Number"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /add_season Anime Name | Season Number\nExample: /add_season Naruto | 2")
+        return
+
+    text = " ".join(context.args)
+    parts = text.split("|")
+    if len(parts) != 2:
+        await update.message.reply_text("Usage: /add_season Anime Name | Season Number\nExample: /add_season Naruto | 2")
+        return
+
+    anime_name = parts[0].strip()
+    season_number = int(parts[1].strip())
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
+    result = cursor.fetchone()
+    if not result:
+        await update.message.reply_text(f"Anime '{anime_name}' not found.")
+        cursor.close()
+        conn.close()
+        return
+
+    anime_id = result[0]
+    cursor.execute("""
+        INSERT INTO seasons (anime_id, season_number)
+        VALUES (%s, %s) ON CONFLICT (anime_id, season_number) DO NOTHING
+    """, (anime_id, season_number))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    await update.message.reply_text(f"✅ Season {season_number} added to {anime_name}.")
+
+
+async def add_episode(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /add_episode Anime Name | Season Number | Episode Number\n"
+            "Example: /add_episode Naruto | 1 | 5"
+        )
+        return
+
+    text = " ".join(context.args)
+    parts = text.split("|")
+    if len(parts) != 3:
+        await update.message.reply_text(
+            "Usage: /add_episode Anime Name | Season Number | Episode Number\n"
+            "Example: /add_episode Naruto | 1 | 5"
+        )
+        return
+
+    anime_name = parts[0].strip()
+    season_number = int(parts[1].strip())
+    episode_number = int(parts[2].strip())
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
+    result = cursor.fetchone()
+    if not result:
+        await update.message.reply_text("Anime not found.")
+        cursor.close()
+        conn.close()
+        return
+
+    cursor.close()
+    conn.close()
+
+    await update.message.reply_text(
+        f"Now upload the episode video to the storage channel with caption:\n\n"
+        f"{anime_name} | {season_number} | {episode_number}"
+    )
+
+
+async def delete_episode(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /delete_episode Anime Name | Season Number | Episode Number"
+        )
+        return
+
+    text = " ".join(context.args)
+    parts = text.split("|")
+    if len(parts) != 3:
+        await update.message.reply_text(
+            "Usage: /delete_episode Anime Name | Season Number | Episode Number"
+        )
+        return
+
+    anime_name = parts[0].strip()
+    season_number = int(parts[1].strip())
+    episode_number = int(parts[2].strip())
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
+    result = cursor.fetchone()
+    if not result:
+        await update.message.reply_text("Anime not found.")
+        cursor.close()
+        conn.close()
+        return
+
+    anime_id = result[0]
+    cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
+    result = cursor.fetchone()
+    if not result:
+        await update.message.reply_text("Season not found.")
+        cursor.close()
+        conn.close()
+        return
+
+    season_id = result[0]
+    cursor.execute("DELETE FROM episodes WHERE season_id = %s AND episode_number = %s", (season_id, episode_number))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    await update.message.reply_text(f"✅ Episode {episode_number} of Season {season_number} deleted.")
+
+
+async def delete_season(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /delete_season Anime Name | Season Number")
+        return
+
+    text = " ".join(context.args)
+    parts = text.split("|")
+    if len(parts) != 2:
+        await update.message.reply_text("Usage: /delete_season Anime Name | Season Number")
+        return
+
+    anime_name = parts[0].strip()
+    season_number = int(parts[1].strip())
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
+    result = cursor.fetchone()
+    if not result:
+        await update.message.reply_text("Anime not found.")
+        cursor.close()
+        conn.close()
+        return
+
+    anime_id = result[0]
+    cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
+    result = cursor.fetchone()
+    if not result:
+        await update.message.reply_text("Season not found.")
+        cursor.close()
+        conn.close()
+        return
+
+    season_id = result[0]
+    cursor.execute("DELETE FROM episodes WHERE season_id = %s", (season_id,))
+    cursor.execute("DELETE FROM seasons WHERE id = %s", (season_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    await update.message.reply_text(f"✅ Season {season_number} and all its episodes deleted.")
+
+
+async def delete_anime(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /delete_anime Anime Name")
+        return
+
+    anime_name = " ".join(context.args)
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
+    result = cursor.fetchone()
+    if not result:
+        await update.message.reply_text("Anime not found.")
+        cursor.close()
+        conn.close()
+        return
+
+    anime_id = result[0]
+    cursor.execute("SELECT id FROM seasons WHERE anime_id = %s", (anime_id,))
+    seasons = cursor.fetchall()
+    for s in seasons:
+        cursor.execute("DELETE FROM episodes WHERE season_id = %s", (s[0],))
+    cursor.execute("DELETE FROM seasons WHERE anime_id = %s", (anime_id,))
+    cursor.execute("DELETE FROM animes WHERE id = %s", (anime_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    await update.message.reply_text(f"✅ {anime_name} and all its seasons/episodes deleted.")
+
+
 async def search_anime(update, context):
     if not context.args:
         await update.message.reply_text("Usage: /search keyword")
         return
 
     keyword = " ".join(context.args)
-
     conn = get_conn()
     cursor = conn.cursor()
-
     cursor.execute("""
-        SELECT name FROM animes
-        WHERE LOWER(name) LIKE LOWER(%s)
-        ORDER BY name ASC
+        SELECT name FROM animes WHERE LOWER(name) LIKE LOWER(%s) ORDER BY name ASC
     """, (f"%{keyword}%",))
-
     results = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -509,87 +787,9 @@ async def search_anime(update, context):
 
     keyboard = []
     for anime in results:
-        keyboard.append([
-            InlineKeyboardButton(anime[0], callback_data=f"anime|{anime[0]}")
-        ])
+        keyboard.append([InlineKeyboardButton(anime[0], callback_data=f"anime|{anime[0]}")])
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        "Search Results:",
-        reply_markup=reply_markup
-    )
-
-
-async def delete_episode(update, context):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /delete_episode Anime_Name EpisodeNumber")
-        return
-
-    episode_number = int(context.args[-1])
-    anime_name = " ".join(context.args[:-1])
-
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
-    result = cursor.fetchone()
-
-    if not result:
-        await update.message.reply_text("Anime not found.")
-        cursor.close()
-        conn.close()
-        return
-
-    anime_id = result[0]
-
-    cursor.execute("""
-        DELETE FROM episodes
-        WHERE anime_id = %s AND episode_number = %s
-    """, (anime_id, episode_number))
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    await update.message.reply_text(f"✅ Episode {episode_number} deleted successfully.")
-
-
-async def delete_anime(update, context):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    if not context.args:
-        await update.message.reply_text("Usage: /delete_anime Anime_Name")
-        return
-
-    anime_name = " ".join(context.args)
-
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
-    result = cursor.fetchone()
-
-    if not result:
-        await update.message.reply_text("Anime not found.")
-        cursor.close()
-        conn.close()
-        return
-
-    anime_id = result[0]
-
-    cursor.execute("DELETE FROM episodes WHERE anime_id = %s", (anime_id,))
-    cursor.execute("DELETE FROM animes WHERE id = %s", (anime_id,))
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    await update.message.reply_text(f"✅ {anime_name} and all its episodes deleted successfully.")
+    await update.message.reply_text("Search Results:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 user_search_mode = set()
@@ -598,14 +798,54 @@ user_search_mode = set()
 async def enter_search_mode(update, context):
     query = update.callback_query
     await query.answer()
-
-    user_id = query.from_user.id
-    user_search_mode.add(user_id)
-
+    user_search_mode.add(query.from_user.id)
     await query.message.reply_text("Type the anime name you want to search:")
 
 
 admin_state = {}
+
+
+async def admin_panel(update, context):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id != ADMIN_ID:
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("➕ Add Anime", callback_data="admin_add_anime")],
+        [InlineKeyboardButton("➕ Add Season", callback_data="admin_add_season")],
+        [InlineKeyboardButton("➕ Add Episode", callback_data="admin_add_episode")],
+        [InlineKeyboardButton("❌ Delete Anime", callback_data="admin_delete_anime")],
+        [InlineKeyboardButton("❌ Delete Season", callback_data="admin_delete_season")],
+        [InlineKeyboardButton("❌ Delete Episode", callback_data="admin_delete_episode")],
+        [InlineKeyboardButton("📊 Analytics", callback_data="admin_analytics")],
+        [InlineKeyboardButton("🔙 Back", callback_data="show_anime")]
+    ]
+    await query.edit_message_text("🛠 Admin Panel", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def handle_admin_actions(update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    action = query.data
+    admin_state[user_id] = action
+
+    if action == "admin_add_anime":
+        await query.message.reply_text("Send anime name to add:")
+    elif action == "admin_add_season":
+        await query.message.reply_text("Send: Anime Name | Season Number\nExample: Naruto | 2")
+    elif action == "admin_add_episode":
+        await query.message.reply_text("Send: Anime Name | Season Number | Episode Number\nExample: Naruto | 1 | 5")
+    elif action == "admin_delete_anime":
+        await query.message.reply_text("Send anime name to delete:")
+    elif action == "admin_delete_season":
+        await query.message.reply_text("Send: Anime Name | Season Number")
+    elif action == "admin_delete_episode":
+        await query.message.reply_text("Send: Anime Name | Season Number | Episode Number")
 
 
 async def handle_admin_text(update, context):
@@ -613,13 +853,11 @@ async def handle_admin_text(update, context):
         return
 
     user_id = update.effective_user.id
-
     if user_id not in admin_state:
         return
 
     action = admin_state[user_id]
     text = update.message.text.strip()
-
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -628,53 +866,107 @@ async def handle_admin_text(update, context):
         conn.commit()
         await update.message.reply_text(f"✅ {text} added successfully.")
 
+    elif action == "admin_add_season":
+        parts = text.split("|")
+        if len(parts) != 2:
+            await update.message.reply_text("Format: Anime Name | Season Number")
+            cursor.close()
+            conn.close()
+            return
+        anime_name = parts[0].strip()
+        season_number = int(parts[1].strip())
+        cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
+        result = cursor.fetchone()
+        if not result:
+            await update.message.reply_text("Anime not found.")
+        else:
+            anime_id = result[0]
+            cursor.execute("""
+                INSERT INTO seasons (anime_id, season_number)
+                VALUES (%s, %s) ON CONFLICT (anime_id, season_number) DO NOTHING
+            """, (anime_id, season_number))
+            conn.commit()
+            await update.message.reply_text(f"✅ Season {season_number} added to {anime_name}.")
+
+    elif action == "admin_add_episode":
+        parts = text.split("|")
+        if len(parts) != 3:
+            await update.message.reply_text("Format: Anime Name | Season Number | Episode Number")
+            cursor.close()
+            conn.close()
+            return
+        anime_name = parts[0].strip()
+        season_number = int(parts[1].strip())
+        episode_number = int(parts[2].strip())
+        await update.message.reply_text(
+            f"Now upload video in channel with caption:\n{anime_name} | {season_number} | {episode_number}"
+        )
+
     elif action == "admin_delete_anime":
         cursor.execute("SELECT id FROM animes WHERE name = %s", (text,))
         result = cursor.fetchone()
-
         if result:
             anime_id = result[0]
-            cursor.execute("DELETE FROM episodes WHERE anime_id = %s", (anime_id,))
+            cursor.execute("SELECT id FROM seasons WHERE anime_id = %s", (anime_id,))
+            seasons = cursor.fetchall()
+            for s in seasons:
+                cursor.execute("DELETE FROM episodes WHERE season_id = %s", (s[0],))
+            cursor.execute("DELETE FROM seasons WHERE anime_id = %s", (anime_id,))
             cursor.execute("DELETE FROM animes WHERE id = %s", (anime_id,))
             conn.commit()
             await update.message.reply_text("✅ Anime deleted.")
         else:
             await update.message.reply_text("Anime not found.")
 
-    elif action in ["admin_add_episode", "admin_delete_episode"]:
+    elif action == "admin_delete_season":
         parts = text.split("|")
         if len(parts) != 2:
-            await update.message.reply_text("Format must be: Anime Name | EpisodeNumber")
+            await update.message.reply_text("Format: Anime Name | Season Number")
             cursor.close()
             conn.close()
             return
-
         anime_name = parts[0].strip()
-        episode_number = int(parts[1].strip())
-
+        season_number = int(parts[1].strip())
         cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
         result = cursor.fetchone()
-
-        if not result:
+        if result:
+            anime_id = result[0]
+            cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
+            s = cursor.fetchone()
+            if s:
+                cursor.execute("DELETE FROM episodes WHERE season_id = %s", (s[0],))
+                cursor.execute("DELETE FROM seasons WHERE id = %s", (s[0],))
+                conn.commit()
+                await update.message.reply_text("✅ Season deleted.")
+            else:
+                await update.message.reply_text("Season not found.")
+        else:
             await update.message.reply_text("Anime not found.")
+
+    elif action == "admin_delete_episode":
+        parts = text.split("|")
+        if len(parts) != 3:
+            await update.message.reply_text("Format: Anime Name | Season Number | Episode Number")
             cursor.close()
             conn.close()
             return
-
-        anime_id = result[0]
-
-        if action == "admin_delete_episode":
-            cursor.execute("""
-                DELETE FROM episodes
-                WHERE anime_id = %s AND episode_number = %s
-            """, (anime_id, episode_number))
-            conn.commit()
-            await update.message.reply_text("✅ Episode deleted.")
-
-        elif action == "admin_add_episode":
-            await update.message.reply_text(
-                f"Now upload video in channel with caption:\n{anime_name} | {episode_number}"
-            )
+        anime_name = parts[0].strip()
+        season_number = int(parts[1].strip())
+        episode_number = int(parts[2].strip())
+        cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
+        result = cursor.fetchone()
+        if result:
+            anime_id = result[0]
+            cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
+            s = cursor.fetchone()
+            if s:
+                cursor.execute("DELETE FROM episodes WHERE season_id = %s AND episode_number = %s", (s[0], episode_number))
+                conn.commit()
+                await update.message.reply_text("✅ Episode deleted.")
+            else:
+                await update.message.reply_text("Season not found.")
+        else:
+            await update.message.reply_text("Anime not found.")
 
     cursor.close()
     conn.close()
@@ -686,23 +978,17 @@ async def handle_text_search(update, context):
         return
 
     user_id = update.effective_user.id
-
     if user_id not in user_search_mode:
         return
 
     user_search_mode.remove(user_id)
-
     keyword = update.message.text
 
     conn = get_conn()
     cursor = conn.cursor()
-
     cursor.execute("""
-        SELECT name FROM animes
-        WHERE LOWER(name) LIKE LOWER(%s)
-        ORDER BY name ASC
+        SELECT name FROM animes WHERE LOWER(name) LIKE LOWER(%s) ORDER BY name ASC
     """, (f"%{keyword}%",))
-
     results = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -713,116 +999,51 @@ async def handle_text_search(update, context):
 
     keyboard = []
     for anime in results:
-        keyboard.append([
-            InlineKeyboardButton(anime[0], callback_data=f"anime|{anime[0]}")
-        ])
+        keyboard.append([InlineKeyboardButton(anime[0], callback_data=f"anime|{anime[0]}")])
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        "Search Results:",
-        reply_markup=reply_markup
-    )
-
-
-async def admin_panel(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != ADMIN_ID:
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("➕ Add Anime", callback_data="admin_add_anime")],
-        [InlineKeyboardButton("➕ Add Episode", callback_data="admin_add_episode")],
-        [InlineKeyboardButton("❌ Delete Anime", callback_data="admin_delete_anime")],
-        [InlineKeyboardButton("❌ Delete Episode", callback_data="admin_delete_episode")],
-        [InlineKeyboardButton("📊 Analytics", callback_data="admin_analytics")],
-        [InlineKeyboardButton("🔙 Back", callback_data="show_anime")]
-    ]
-
-    await query.edit_message_text(
-        "🛠 Admin Panel",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def handle_admin_actions(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    if user_id != ADMIN_ID:
-        return
-
-    action = query.data
-    admin_state[user_id] = action
-
-    if action == "admin_add_anime":
-        await query.message.reply_text("Send anime name to add:")
-
-    elif action == "admin_add_episode":
-        await query.message.reply_text(
-            "Send: Anime Name | Episode Number\n\nExample:\nNaruto | 1"
-        )
-
-    elif action == "admin_delete_anime":
-        await query.message.reply_text("Send anime name to delete:")
-
-    elif action == "admin_delete_episode":
-        await query.message.reply_text("Send: Anime Name | Episode Number to delete")
+    await update.message.reply_text("Search Results:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def show_analytics(update, context):
     query = update.callback_query
     await query.answer()
-
     if query.from_user.id != ADMIN_ID:
         return
 
     conn = get_conn()
     cursor = conn.cursor()
-
     cursor.execute("SELECT COUNT(*) FROM users")
     total_users = cursor.fetchone()[0]
-
     cursor.execute("SELECT COUNT(*) FROM watch_history")
     total_views = cursor.fetchone()[0]
-
     cursor.execute("""
         SELECT animes.name, COUNT(*) as views
         FROM watch_history
         JOIN animes ON watch_history.anime_id = animes.id
         GROUP BY animes.id, animes.name
-        ORDER BY views DESC
-        LIMIT 1
+        ORDER BY views DESC LIMIT 1
     """)
     result = cursor.fetchone()
-
-    if result:
-        top_anime = result[0]
-        top_views = result[1]
-    else:
-        top_anime = "N/A"
-        top_views = 0
-
+    top_anime = result[0] if result else "N/A"
+    top_views = result[1] if result else 0
     cursor.close()
     conn.close()
 
-    stats_text = f"""
-📊 Analytics
-
-👥 Total Users: {total_users}
-🎬 Total Episode Views: {total_views}
-🔥 Most Watched Anime: {top_anime} ({top_views} views)
-"""
-
     await query.edit_message_text(
-        stats_text,
+        f"📊 Analytics\n\n"
+        f"👥 Total Users: {total_users}\n"
+        f"🎬 Total Episode Views: {total_views}\n"
+        f"🔥 Most Watched Anime: {top_anime} ({top_views} views)",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
         ])
     )
+
+
+async def noop(update, context):
+    """Handle noop buttons (header labels)"""
+    query = update.callback_query
+    await query.answer()
 
 
 def main():
@@ -833,18 +1054,22 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(check_join, pattern="^check_join$"))
     app.add_handler(CallbackQueryHandler(show_anime, pattern="^(show_anime|page\\|)"))
-    app.add_handler(CallbackQueryHandler(show_episodes, pattern="^anime\\|"))
+    app.add_handler(CallbackQueryHandler(show_seasons, pattern="^(anime\\||seasons\\|)"))
+    app.add_handler(CallbackQueryHandler(show_episodes, pattern="^(season_ep\\||eppage\\|)"))
     app.add_handler(CallbackQueryHandler(send_episode, pattern="^episode\\|"))
+    app.add_handler(CallbackQueryHandler(noop, pattern="^noop$"))
     app.add_handler(CommandHandler("add_anime", add_anime))
+    app.add_handler(CommandHandler("add_season", add_season))
     app.add_handler(CommandHandler("add_episode", add_episode))
-    app.add_handler(CallbackQueryHandler(admin_panel, pattern="admin_panel"))
-    app.add_handler(CallbackQueryHandler(show_analytics, pattern="admin_analytics"))
+    app.add_handler(CommandHandler("delete_anime", delete_anime))
+    app.add_handler(CommandHandler("delete_season", delete_season))
+    app.add_handler(CommandHandler("delete_episode", delete_episode))
+    app.add_handler(CommandHandler("search", search_anime))
+    app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
+    app.add_handler(CallbackQueryHandler(show_analytics, pattern="^admin_analytics$"))
     app.add_handler(CallbackQueryHandler(handle_admin_actions, pattern="^admin_"))
     app.add_handler(MessageHandler(filters.Chat(CHANNEL_ID) & filters.VIDEO, handle_channel_video))
-    app.add_handler(CommandHandler("search", search_anime))
-    app.add_handler(CommandHandler("delete_episode", delete_episode))
-    app.add_handler(CommandHandler("delete_anime", delete_anime))
-    app.add_handler(CallbackQueryHandler(enter_search_mode, pattern="search_mode"))
+    app.add_handler(CallbackQueryHandler(enter_search_mode, pattern="^search_mode$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_search), group=2)
 
@@ -854,6 +1079,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
