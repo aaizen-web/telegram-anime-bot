@@ -187,6 +187,11 @@ def build_episode_keyboard(episodes, season_id, anime_id, page=0):
                         callback_data=f"episode|{anime_id}|{season_id}|{ep[0]}"
                     )
                 )
+            else:
+                # Empty placeholder to keep grid structure
+                ep_row.append(
+                    InlineKeyboardButton(" ", callback_data="noop")
+                )
         if ep_row:
             keyboard.append(ep_row)
 
@@ -1010,6 +1015,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
