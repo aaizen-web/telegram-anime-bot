@@ -175,7 +175,8 @@ def build_episode_keyboard(episodes, season_id, anime_id, page=0):
             )
         keyboard.append(header_row)
 
-    for row in range(EPISODES_PER_COLUMN):
+    max_rows = max(len(col) for col in columns) if columns else 0
+    for row in range(max_rows):
         ep_row = []
         for col in columns:
             if row < len(col):
