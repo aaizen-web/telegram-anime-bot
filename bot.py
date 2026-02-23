@@ -8,9 +8,9 @@ FORCE_JOIN_CHANNEL = "@farrisforger"
 FORCE_JOIN_LINK = "https://t.me/farrisforger"
 
 from telegram.ext import MessageHandler, filters
+from psycopg2 import pool
 
 import psycopg2
-import psycopg2.extras
 import asyncio
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -30,9 +30,31 @@ EPISODES_PER_COLUMN = 10
 
 user_cooldown = {}
 
+# =====================================================
+# ========== CONNECTION POOL ==========================
+# =====================================================
+
+connection_pool = None
+
+def init_pool():
+    global connection_pool
+    connection_pool = pool.SimpleConnectionPool(
+        minconn=2,
+        maxconn=10,
+        dsn=DATABASE_URL,
+        sslmode='require'
+    )
+    print("✅ Connection pool initialized.")
+
 def get_conn():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    return conn
+    return connection_pool.getconn()
+
+def release_conn(conn):
+    connection_pool.putconn(conn)
+
+# =====================================================
+# ========== DATABASE INIT ============================
+# =====================================================
 
 def init_db():
     conn = get_conn()
@@ -62,7 +84,6 @@ def init_db():
         )
     """)
 
-    # Create episodes table with new structure if not exists
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS episodes (
             id SERIAL PRIMARY KEY,
@@ -87,8 +108,12 @@ def init_db():
 
     conn.commit()
     cursor.close()
-    conn.close()
+    release_conn(conn)
     print("✅ Database tables initialized.")
+
+# =====================================================
+# ========== ANTI SPAM ================================
+# =====================================================
 
 def is_spamming(user_id):
     now = asyncio.get_event_loop().time()
@@ -97,6 +122,10 @@ def is_spamming(user_id):
             return True
     user_cooldown[user_id] = now
     return False
+
+# =====================================================
+# ========== FORCE JOIN CHECK =========================
+# =====================================================
 
 async def is_user_member(bot, user_id):
     try:
@@ -116,18 +145,19 @@ async def send_join_message(update):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+# =====================================================
+# ========== EPISODE GRID LAYOUT ======================
+# =====================================================
+
 def build_episode_keyboard(episodes, season_id, anime_id, page=0):
     start = page * EPISODES_PER_PAGE
     end = start + EPISODES_PER_PAGE
     page_episodes = episodes[start:end]
 
     keyboard = []
-
     columns = []
     for i in range(0, len(page_episodes), EPISODES_PER_COLUMN):
         columns.append(page_episodes[i:i + EPISODES_PER_COLUMN])
-
-    num_rows = EPISODES_PER_COLUMN
 
     if len(columns) > 1:
         header_row = []
@@ -139,7 +169,7 @@ def build_episode_keyboard(episodes, season_id, anime_id, page=0):
             )
         keyboard.append(header_row)
 
-    for row in range(num_rows):
+    for row in range(EPISODES_PER_COLUMN):
         ep_row = []
         for col in columns:
             if row < len(col):
@@ -165,6 +195,10 @@ def build_episode_keyboard(episodes, season_id, anime_id, page=0):
     keyboard.append([InlineKeyboardButton("🔙 Back to Seasons", callback_data=f"seasons|{anime_id}")])
     return keyboard
 
+# =====================================================
+# ========== BOT HANDLERS =============================
+# =====================================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -184,7 +218,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """, (user_id,))
     conn.commit()
     cursor.close()
-    conn.close()
+    release_conn(conn)
 
     keyboard = [[InlineKeyboardButton("📚 Browse Anime", callback_data="show_anime")]]
     if user_id == ADMIN_ID:
@@ -194,6 +228,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Welcome! Choose an option:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
 
 async def check_join(update, context):
     query = update.callback_query
@@ -223,7 +258,7 @@ async def check_join(update, context):
     """, (user_id,))
     conn.commit()
     cursor.close()
-    conn.close()
+    release_conn(conn)
 
     keyboard = [[InlineKeyboardButton("📚 Browse Anime", callback_data="show_anime")]]
     if user_id == ADMIN_ID:
@@ -233,6 +268,7 @@ async def check_join(update, context):
         "✅ Thank you for joining! Welcome!\n\nChoose an option:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
 
 async def show_anime(update, context):
     query = update.callback_query
@@ -251,7 +287,7 @@ async def show_anime(update, context):
     """, (ANIME_PER_PAGE, page * ANIME_PER_PAGE))
     animes = cursor.fetchall()
     cursor.close()
-    conn.close()
+    release_conn(conn)
 
     keyboard = [[InlineKeyboardButton("🔍 Search", callback_data="search_mode")]]
     for anime in animes:
@@ -267,6 +303,7 @@ async def show_anime(update, context):
 
     await query.edit_message_text("Select an anime:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+
 async def show_seasons(update, context):
     query = update.callback_query
     await query.answer()
@@ -280,11 +317,11 @@ async def show_seasons(update, context):
         if not result:
             await query.answer("Anime not found!", show_alert=True)
             cursor.close()
-            conn.close()
+            release_conn(conn)
             return
         anime_id = result[0]
         cursor.close()
-        conn.close()
+        release_conn(conn)
     else:
         _, anime_id = query.data.split("|", 1)
         anime_id = int(anime_id)
@@ -299,7 +336,7 @@ async def show_seasons(update, context):
     """, (anime_id,))
     seasons = cursor.fetchall()
     cursor.close()
-    conn.close()
+    release_conn(conn)
 
     if not seasons:
         await query.edit_message_text(
@@ -326,6 +363,7 @@ async def show_seasons(update, context):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+
 async def show_episodes(update, context):
     query = update.callback_query
     await query.answer()
@@ -347,7 +385,7 @@ async def show_episodes(update, context):
     """, (season_id,))
     episodes = cursor.fetchall()
     cursor.close()
-    conn.close()
+    release_conn(conn)
 
     if not episodes:
         await query.edit_message_text(
@@ -367,6 +405,7 @@ async def show_episodes(update, context):
         f"📺 {anime_name} — Season {season_number}\n🎬 Episodes {start}-{end} of {total}:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
 
 async def send_episode(update, context):
     query = update.callback_query
@@ -389,7 +428,7 @@ async def send_episode(update, context):
     if not result:
         await query.answer("Episode not found!", show_alert=True)
         cursor.close()
-        conn.close()
+        release_conn(conn)
         return
 
     file_id = result[0]
@@ -407,10 +446,11 @@ async def send_episode(update, context):
     """, (query.from_user.id, anime_id, season_id, episode_number))
     conn.commit()
     cursor.close()
-    conn.close()
+    release_conn(conn)
 
     warning_msg = await query.message.reply_text("⚠️ All messages will be deleted in 5 minutes.")
     asyncio.create_task(auto_delete([video_msg, warning_msg, query.message]))
+
 
 async def handle_channel_video(update, context):
     print("Channel update received")
@@ -442,21 +482,19 @@ async def handle_channel_video(update, context):
         if not result:
             print(f"Anime '{anime_name}' not found")
             cursor.close()
-            conn.close()
+            release_conn(conn)
             return
 
         anime_id = result[0]
 
         cursor.execute("""
             INSERT INTO seasons (anime_id, season_number)
-            VALUES (%s, %s)
-            ON CONFLICT (anime_id, season_number) DO NOTHING
+            VALUES (%s, %s) ON CONFLICT (anime_id, season_number) DO NOTHING
         """, (anime_id, season_number))
 
         cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
         season_id = cursor.fetchone()[0]
 
-        # Use anime_id + episode_number as conflict target (old constraint)
         cursor.execute("""
             INSERT INTO episodes (anime_id, season_id, episode_number, file_id)
             VALUES (%s, %s, %s, %s)
@@ -466,8 +504,9 @@ async def handle_channel_video(update, context):
 
         conn.commit()
         cursor.close()
-        conn.close()
+        release_conn(conn)
         print(f"✅ {anime_name} | Season {season_number} | Episode {episode_number} saved.")
+
 
 async def auto_delete(messages):
     await asyncio.sleep(300)
@@ -476,6 +515,7 @@ async def auto_delete(messages):
             await msg.delete()
         except:
             pass
+
 
 async def add_anime(update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -489,8 +529,9 @@ async def add_anime(update, context):
     cursor.execute("INSERT INTO animes (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (anime_name,))
     conn.commit()
     cursor.close()
-    conn.close()
+    release_conn(conn)
     await update.message.reply_text(f"✅ {anime_name} added successfully.")
+
 
 async def add_season(update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -512,7 +553,7 @@ async def add_season(update, context):
     if not result:
         await update.message.reply_text(f"Anime '{anime_name}' not found.")
         cursor.close()
-        conn.close()
+        release_conn(conn)
         return
     anime_id = result[0]
     cursor.execute("""
@@ -521,23 +562,20 @@ async def add_season(update, context):
     """, (anime_id, season_number))
     conn.commit()
     cursor.close()
-    conn.close()
+    release_conn(conn)
     await update.message.reply_text(f"✅ Season {season_number} added to {anime_name}.")
+
 
 async def add_episode(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
     if not context.args:
-        await update.message.reply_text(
-            "Usage: /add_episode Anime Name | Season Number | Episode Number"
-        )
+        await update.message.reply_text("Usage: /add_episode Anime Name | Season Number | Episode Number")
         return
     text = " ".join(context.args)
     parts = text.split("|")
     if len(parts) != 3:
-        await update.message.reply_text(
-            "Usage: /add_episode Anime Name | Season Number | Episode Number"
-        )
+        await update.message.reply_text("Usage: /add_episode Anime Name | Season Number | Episode Number")
         return
     anime_name = parts[0].strip()
     season_number = int(parts[1].strip())
@@ -547,7 +585,7 @@ async def add_episode(update, context):
     cursor.execute("SELECT id FROM animes WHERE name = %s", (anime_name,))
     result = cursor.fetchone()
     cursor.close()
-    conn.close()
+    release_conn(conn)
     if not result:
         await update.message.reply_text("Anime not found.")
         return
@@ -555,6 +593,7 @@ async def add_episode(update, context):
         f"Now upload the episode video to the storage channel with caption:\n\n"
         f"{anime_name} | {season_number} | {episode_number}"
     )
+
 
 async def delete_episode(update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -577,7 +616,7 @@ async def delete_episode(update, context):
     if not result:
         await update.message.reply_text("Anime not found.")
         cursor.close()
-        conn.close()
+        release_conn(conn)
         return
     anime_id = result[0]
     cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
@@ -585,14 +624,15 @@ async def delete_episode(update, context):
     if not result:
         await update.message.reply_text("Season not found.")
         cursor.close()
-        conn.close()
+        release_conn(conn)
         return
     season_id = result[0]
     cursor.execute("DELETE FROM episodes WHERE season_id = %s AND episode_number = %s", (season_id, episode_number))
     conn.commit()
     cursor.close()
-    conn.close()
+    release_conn(conn)
     await update.message.reply_text(f"✅ Episode {episode_number} of Season {season_number} deleted.")
+
 
 async def delete_season(update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -614,7 +654,7 @@ async def delete_season(update, context):
     if not result:
         await update.message.reply_text("Anime not found.")
         cursor.close()
-        conn.close()
+        release_conn(conn)
         return
     anime_id = result[0]
     cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
@@ -622,15 +662,16 @@ async def delete_season(update, context):
     if not result:
         await update.message.reply_text("Season not found.")
         cursor.close()
-        conn.close()
+        release_conn(conn)
         return
     season_id = result[0]
     cursor.execute("DELETE FROM episodes WHERE season_id = %s", (season_id,))
     cursor.execute("DELETE FROM seasons WHERE id = %s", (season_id,))
     conn.commit()
     cursor.close()
-    conn.close()
+    release_conn(conn)
     await update.message.reply_text(f"✅ Season {season_number} and all its episodes deleted.")
+
 
 async def delete_anime(update, context):
     if update.effective_user.id != ADMIN_ID:
@@ -646,7 +687,7 @@ async def delete_anime(update, context):
     if not result:
         await update.message.reply_text("Anime not found.")
         cursor.close()
-        conn.close()
+        release_conn(conn)
         return
     anime_id = result[0]
     cursor.execute("SELECT id FROM seasons WHERE anime_id = %s", (anime_id,))
@@ -657,8 +698,9 @@ async def delete_anime(update, context):
     cursor.execute("DELETE FROM animes WHERE id = %s", (anime_id,))
     conn.commit()
     cursor.close()
-    conn.close()
+    release_conn(conn)
     await update.message.reply_text(f"✅ {anime_name} and all its seasons/episodes deleted.")
+
 
 async def search_anime(update, context):
     if not context.args:
@@ -672,7 +714,7 @@ async def search_anime(update, context):
     """, (f"%{keyword}%",))
     results = cursor.fetchall()
     cursor.close()
-    conn.close()
+    release_conn(conn)
     if not results:
         await update.message.reply_text("No anime found.")
         return
@@ -681,7 +723,9 @@ async def search_anime(update, context):
         keyboard.append([InlineKeyboardButton(anime[0], callback_data=f"anime|{anime[0]}")])
     await update.message.reply_text("Search Results:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+
 user_search_mode = set()
+
 
 async def enter_search_mode(update, context):
     query = update.callback_query
@@ -689,7 +733,9 @@ async def enter_search_mode(update, context):
     user_search_mode.add(query.from_user.id)
     await query.message.reply_text("Type the anime name you want to search:")
 
+
 admin_state = {}
+
 
 async def admin_panel(update, context):
     query = update.callback_query
@@ -707,6 +753,7 @@ async def admin_panel(update, context):
         [InlineKeyboardButton("🔙 Back", callback_data="show_anime")]
     ]
     await query.edit_message_text("🛠 Admin Panel", reply_markup=InlineKeyboardMarkup(keyboard))
+
 
 async def handle_admin_actions(update, context):
     query = update.callback_query
@@ -729,6 +776,7 @@ async def handle_admin_actions(update, context):
     elif action == "admin_delete_episode":
         await query.message.reply_text("Send: Anime Name | Season Number | Episode Number")
 
+
 async def handle_admin_text(update, context):
     if not update.effective_user:
         return
@@ -750,7 +798,7 @@ async def handle_admin_text(update, context):
         if len(parts) != 2:
             await update.message.reply_text("Format: Anime Name | Season Number")
             cursor.close()
-            conn.close()
+            release_conn(conn)
             return
         anime_name = parts[0].strip()
         season_number = int(parts[1].strip())
@@ -772,7 +820,7 @@ async def handle_admin_text(update, context):
         if len(parts) != 3:
             await update.message.reply_text("Format: Anime Name | Season Number | Episode Number")
             cursor.close()
-            conn.close()
+            release_conn(conn)
             return
         anime_name = parts[0].strip()
         season_number = int(parts[1].strip())
@@ -802,7 +850,7 @@ async def handle_admin_text(update, context):
         if len(parts) != 2:
             await update.message.reply_text("Format: Anime Name | Season Number")
             cursor.close()
-            conn.close()
+            release_conn(conn)
             return
         anime_name = parts[0].strip()
         season_number = int(parts[1].strip())
@@ -827,7 +875,7 @@ async def handle_admin_text(update, context):
         if len(parts) != 3:
             await update.message.reply_text("Format: Anime Name | Season Number | Episode Number")
             cursor.close()
-            conn.close()
+            release_conn(conn)
             return
         anime_name = parts[0].strip()
         season_number = int(parts[1].strip())
@@ -848,8 +896,9 @@ async def handle_admin_text(update, context):
             await update.message.reply_text("Anime not found.")
 
     cursor.close()
-    conn.close()
+    release_conn(conn)
     admin_state.pop(user_id)
+
 
 async def handle_text_search(update, context):
     if not update.effective_user:
@@ -866,7 +915,7 @@ async def handle_text_search(update, context):
     """, (f"%{keyword}%",))
     results = cursor.fetchall()
     cursor.close()
-    conn.close()
+    release_conn(conn)
     if not results:
         await update.message.reply_text("No anime found.")
         return
@@ -874,6 +923,7 @@ async def handle_text_search(update, context):
     for anime in results:
         keyboard.append([InlineKeyboardButton(anime[0], callback_data=f"anime|{anime[0]}")])
     await update.message.reply_text("Search Results:", reply_markup=InlineKeyboardMarkup(keyboard))
+
 
 async def show_analytics(update, context):
     query = update.callback_query
@@ -897,7 +947,7 @@ async def show_analytics(update, context):
     top_anime = result[0] if result else "N/A"
     top_views = result[1] if result else 0
     cursor.close()
-    conn.close()
+    release_conn(conn)
     await query.edit_message_text(
         f"📊 Analytics\n\n"
         f"👥 Total Users: {total_users}\n"
@@ -908,12 +958,16 @@ async def show_analytics(update, context):
         ])
     )
 
+
 async def noop(update, context):
     query = update.callback_query
     await query.answer()
 
+
 def main():
-    init_db()
+    init_pool()   # 🔥 Start connection pool first
+    init_db()     # ✅ Create tables
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -941,8 +995,10 @@ def main():
     print("🚀 Bot is running...")
     app.run_polling()
 
+
 if __name__ == "__main__":
     main()
+
 
 
 
