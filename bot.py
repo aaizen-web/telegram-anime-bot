@@ -59,7 +59,8 @@ def init_db():
         UNIQUE(anime_id, episode_number))""")
     # Migrate constraint: drop old unique(anime_id, episode_number), add unique(anime_id, season_id, episode_number)
     cursor.execute("ALTER TABLE episodes DROP CONSTRAINT IF EXISTS episodes_anime_id_episode_number_key")
-    cursor.execute("ALTER TABLE episodes ADD CONSTRAINT IF NOT EXISTS episodes_unique_season_ep UNIQUE (anime_id, season_id, episode_number)")
+    cursor.execute("ALTER TABLE episodes DROP CONSTRAINT IF EXISTS episodes_unique_season_ep")
+    cursor.execute("ALTER TABLE episodes ADD CONSTRAINT episodes_unique_season_ep UNIQUE (anime_id, season_id, episode_number)")
     cursor.execute("""CREATE TABLE IF NOT EXISTS watch_history (
         id SERIAL PRIMARY KEY,
         user_id BIGINT,
