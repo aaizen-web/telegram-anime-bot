@@ -57,6 +57,9 @@ def init_db():
         episode_number INTEGER NOT NULL,
         file_id TEXT NOT NULL,
         UNIQUE(anime_id, episode_number))""")
+    # Migrate constraint: drop old unique(anime_id, episode_number), add unique(anime_id, season_id, episode_number)
+    cursor.execute("ALTER TABLE episodes DROP CONSTRAINT IF EXISTS episodes_anime_id_episode_number_key")
+    cursor.execute("ALTER TABLE episodes ADD CONSTRAINT IF NOT EXISTS episodes_unique_season_ep UNIQUE (anime_id, season_id, episode_number)")
     cursor.execute("""CREATE TABLE IF NOT EXISTS watch_history (
         id SERIAL PRIMARY KEY,
         user_id BIGINT,
@@ -307,7 +310,7 @@ async def handle_channel_video(update, context):
         cursor.execute("INSERT INTO seasons (anime_id, season_number) VALUES (%s, %s) ON CONFLICT (anime_id, season_number) DO NOTHING", (anime_id, season_number))
         cursor.execute("SELECT id FROM seasons WHERE anime_id = %s AND season_number = %s", (anime_id, season_number))
         season_id = cursor.fetchone()[0]
-        cursor.execute("INSERT INTO episodes (anime_id, season_id, episode_number, file_id) VALUES (%s, %s, %s, %s) ON CONFLICT (anime_id, episode_number) DO UPDATE SET file_id = EXCLUDED.file_id, season_id = EXCLUDED.season_id", (anime_id, season_id, episode_number, file_id))
+        cursor.execute("INSERT INTO episodes (anime_id, season_id, episode_number, file_id) VALUES (%s, %s, %s, %s) ON CONFLICT (anime_id, season_id, episode_number) DO UPDATE SET file_id = EXCLUDED.file_id", (anime_id, season_id, episode_number, file_id))
         conn.commit()
         cursor.close()
         release_conn(conn)
@@ -829,6 +832,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
