@@ -206,8 +206,10 @@ async def show_anime(update, context):
     release_conn(conn)
     keyboard = [[InlineKeyboardButton("🔍 Search", callback_data="search_mode")]]
     for anime in animes:
-        display_name = str(anime[2]) + ". " + anime[0]
-        keyboard.append([InlineKeyboardButton(display_name, callback_data="anime|" + str(anime[1]))])
+        keyboard.append([
+            InlineKeyboardButton(str(anime[2]), callback_data="noop"),
+            InlineKeyboardButton(anime[0], callback_data="anime|" + str(anime[1]))
+        ])
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("⬅ Previous", callback_data="page|" + str(page-1)))
@@ -565,8 +567,10 @@ async def search_anime(update, context):
         return
     keyboard = []
     for anime in results:
-        display_name = str(anime[2]) + ". " + anime[0]
-        keyboard.append([InlineKeyboardButton(display_name, callback_data="anime|" + str(anime[1]))])
+        keyboard.append([
+            InlineKeyboardButton(str(anime[2]), callback_data="noop"),
+            InlineKeyboardButton(anime[0], callback_data="anime|" + str(anime[1]))
+        ])
     await update.message.reply_text("Search Results:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 user_search_mode = set()
@@ -783,8 +787,10 @@ async def handle_text_search(update, context):
         return
     keyboard = []
     for anime in results:
-        display_name = str(anime[2]) + ". " + anime[0]
-        keyboard.append([InlineKeyboardButton(display_name, callback_data="anime|" + str(anime[1]))])
+        keyboard.append([
+            InlineKeyboardButton(str(anime[2]), callback_data="noop"),
+            InlineKeyboardButton(anime[0], callback_data="anime|" + str(anime[1]))
+        ])
     await update.message.reply_text("Search Results:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_analytics(update, context):
