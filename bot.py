@@ -68,18 +68,6 @@ def init_db():
         season_id INTEGER,
         episode_number INTEGER,
         watched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-    # Add serial_number column if it doesn't exist (migration for existing deployments)
-    cursor.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name='animes' AND column_name='serial_number'
-            ) THEN
-                ALTER TABLE animes ADD COLUMN serial_number SERIAL UNIQUE;
-            END IF;
-        END$$;
-    """)
     conn.commit()
     cursor.close()
     release_conn(conn)
@@ -200,16 +188,13 @@ async def show_anime(update, context):
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM animes")
     total = cursor.fetchone()[0]
-    cursor.execute("SELECT name, id, serial_number FROM animes ORDER BY serial_number ASC LIMIT %s OFFSET %s", (ANIME_PER_PAGE, page * ANIME_PER_PAGE))
+    cursor.execute("SELECT name, id FROM animes ORDER BY name ASC LIMIT %s OFFSET %s", (ANIME_PER_PAGE, page * ANIME_PER_PAGE))
     animes = cursor.fetchall()
     cursor.close()
     release_conn(conn)
     keyboard = [[InlineKeyboardButton("🔍 Search", callback_data="search_mode")]]
     for anime in animes:
-        keyboard.append([
-            InlineKeyboardButton(str(anime[2]), callback_data="noop"),
-            InlineKeyboardButton(anime[0], callback_data="anime|" + str(anime[1]))
-        ])
+        keyboard.append([InlineKeyboardButton(anime[0], callback_data="anime|" + str(anime[1]))])
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("⬅ Previous", callback_data="page|" + str(page-1)))
@@ -558,7 +543,7 @@ async def search_anime(update, context):
     keyword = " ".join(context.args)
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT name, id, serial_number FROM animes WHERE LOWER(name) LIKE LOWER(%s) ORDER BY serial_number ASC", ("%" + keyword + "%",))
+    cursor.execute("SELECT name, id FROM animes WHERE LOWER(name) LIKE LOWER(%s) ORDER BY name ASC", ("%" + keyword + "%",))
     results = cursor.fetchall()
     cursor.close()
     release_conn(conn)
@@ -567,10 +552,7 @@ async def search_anime(update, context):
         return
     keyboard = []
     for anime in results:
-        keyboard.append([
-            InlineKeyboardButton(str(anime[2]), callback_data="noop"),
-            InlineKeyboardButton(anime[0], callback_data="anime|" + str(anime[1]))
-        ])
+        keyboard.append([InlineKeyboardButton(anime[0], callback_data="anime|" + str(anime[1]))])
     await update.message.reply_text("Search Results:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 user_search_mode = set()
@@ -778,7 +760,7 @@ async def handle_text_search(update, context):
     keyword = update.message.text
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT name, id, serial_number FROM animes WHERE LOWER(name) LIKE LOWER(%s) ORDER BY serial_number ASC", ("%" + keyword + "%",))
+    cursor.execute("SELECT name, id FROM animes WHERE LOWER(name) LIKE LOWER(%s) ORDER BY name ASC", ("%" + keyword + "%",))
     results = cursor.fetchall()
     cursor.close()
     release_conn(conn)
@@ -787,10 +769,7 @@ async def handle_text_search(update, context):
         return
     keyboard = []
     for anime in results:
-        keyboard.append([
-            InlineKeyboardButton(str(anime[2]), callback_data="noop"),
-            InlineKeyboardButton(anime[0], callback_data="anime|" + str(anime[1]))
-        ])
+        keyboard.append([InlineKeyboardButton(anime[0], callback_data="anime|" + str(anime[1]))])
     await update.message.reply_text("Search Results:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_analytics(update, context):
@@ -854,6 +833,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
